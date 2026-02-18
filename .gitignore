@@ -1,0 +1,5 @@
+out/
+*.zst
+*.tar
+*.db
+__pycache__/
