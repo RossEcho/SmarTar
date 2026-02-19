@@ -2,21 +2,27 @@ import sys
 import os
 import sqlite3
 import subprocess
-import time
 
 
 def create_index(db_path, folder):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
+    # rebuild index deterministically every run
+    cur.execute("DROP TABLE IF EXISTS files")
+
     cur.execute("""
     CREATE TABLE files (
-        path TEXT,
+        rel_path TEXT,
+        tar_path TEXT,
         size INTEGER,
         mtime INTEGER,
         ext TEXT
     )
     """)
+
+    folder = os.path.normpath(folder)
+    tar_prefix = folder.lstrip("./")
 
     for root, dirs, files in os.walk(folder):
         for name in files:
@@ -31,10 +37,11 @@ def create_index(db_path, folder):
             size = stat.st_size
             mtime = int(stat.st_mtime)
             ext = os.path.splitext(name)[1].lower()
+            tar_path = os.path.join(tar_prefix, rel_path)
 
             cur.execute(
-                "INSERT INTO files VALUES (?, ?, ?, ?)",
-                (rel_path, size, mtime, ext)
+                "INSERT INTO files VALUES (?, ?, ?, ?, ?)",
+                (rel_path, tar_path, size, mtime, ext)
             )
 
     conn.commit()
@@ -43,11 +50,10 @@ def create_index(db_path, folder):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python pack.py <folder>")
+        print("Usage: python src/pack.py <folder>")
         return
 
     folder = sys.argv[1]
-
     if not os.path.isdir(folder):
         print(f"Error: {folder} is not a folder")
         return
@@ -55,7 +61,6 @@ def main():
     name = os.path.basename(os.path.abspath(folder))
 
     os.makedirs("out", exist_ok=True)
-
     archive_path = f"out/{name}.tar.zst"
     db_path = f"out/{name}.db"
 
@@ -63,14 +68,7 @@ def main():
     create_index(db_path, folder)
 
     print("[*] Packing archive...")
-    cmd = [
-        "tar",
-        "--use-compress-program=zstd",
-        "-cf",
-        archive_path,
-        folder
-    ]
-
+    cmd = ["tar", "--use-compress-program=zstd", "-cf", archive_path, folder]
     subprocess.run(cmd, check=True)
 
     print("[+] Done")
