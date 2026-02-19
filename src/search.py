@@ -5,7 +5,7 @@ import sqlite3
 
 def usage():
     print("Usage:")
-    print("  python src/search.py <index.db> <query>")
+    print("  python src/search.py <index.db> <query> [--paths] [--limit N]")
     print("")
     print("Query examples:")
     print("  ext=.json")
@@ -13,59 +13,125 @@ def usage():
     print("  path=logs/")
     print("  size>100000")
     print("  mtime<1700000000   (unix epoch)")
-    print("  any text -> substring match on path")
+    print("  any text -> substring match on tar_path")
+    print("")
+    print("Flags:")
+    print("  --paths        print only tar_path (one per line)")
+    print("  --limit N      limit number of results")
     print("")
 
 
-def build_sql(query: str):
+def parse_args(argv):
+    if len(argv) < 3:
+        return None
+
+    db_path = argv[1]
+
+    # Parse flags at the end; everything else becomes query text
+    paths_only = False
+    limit = None
+
+    tokens = argv[2:]
+    query_parts = []
+
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--paths":
+            paths_only = True
+            i += 1
+            continue
+        if t == "--limit":
+            if i == len(tokens) - 1:
+                raise ValueError("--limit requires a number")
+            limit = int(tokens[i + 1])
+            i += 2
+            continue
+        query_parts.append(t)
+        i += 1
+
+    query = " ".join(query_parts).strip()
+    if not query:
+        query = ""
+
+    return db_path, query, paths_only, limit
+
+
+def build_sql(query: str, limit: int | None):
     q = query.strip()
 
-    # operators
+    base_select = "SELECT tar_path, size, mtime, ext FROM files"
+    params = []
+
     if q.startswith("ext="):
         ext = q.split("=", 1)[1].strip().lower()
-        return ("SELECT path, size, mtime, ext FROM files WHERE ext = ? ORDER BY path", [ext])
+        sql = base_select + " WHERE ext = ? ORDER BY tar_path"
+        params = [ext]
 
-    if q.startswith("name="):
+    elif q.startswith("name="):
         needle = q.split("=", 1)[1].strip()
-        return ("SELECT path, size, mtime, ext FROM files WHERE path LIKE ? ORDER BY path", [f"%{needle}%"])
+        sql = base_select + " WHERE tar_path LIKE ? ORDER BY tar_path"
+        params = [f"%{needle}%"]
 
-    if q.startswith("path="):
+    elif q.startswith("path="):
         needle = q.split("=", 1)[1].strip()
-        return ("SELECT path, size, mtime, ext FROM files WHERE path LIKE ? ORDER BY path", [f"%{needle}%"])
+        sql = base_select + " WHERE tar_path LIKE ? ORDER BY tar_path"
+        params = [f"%{needle}%"]
 
-    if q.startswith("size>"):
+    elif q.startswith("size>"):
         n = int(q[5:].strip())
-        return ("SELECT path, size, mtime, ext FROM files WHERE size > ? ORDER BY size DESC", [n])
+        sql = base_select + " WHERE size > ? ORDER BY size DESC"
+        params = [n]
 
-    if q.startswith("size<"):
+    elif q.startswith("size<"):
         n = int(q[5:].strip())
-        return ("SELECT path, size, mtime, ext FROM files WHERE size < ? ORDER BY size ASC", [n])
+        sql = base_select + " WHERE size < ? ORDER BY size ASC"
+        params = [n]
 
-    if q.startswith("mtime>"):
+    elif q.startswith("mtime>"):
         n = int(q[6:].strip())
-        return ("SELECT path, size, mtime, ext FROM files WHERE mtime > ? ORDER BY mtime DESC", [n])
+        sql = base_select + " WHERE mtime > ? ORDER BY mtime DESC"
+        params = [n]
 
-    if q.startswith("mtime<"):
+    elif q.startswith("mtime<"):
         n = int(q[6:].strip())
-        return ("SELECT path, size, mtime, ext FROM files WHERE mtime < ? ORDER BY mtime ASC", [n])
+        sql = base_select + " WHERE mtime < ? ORDER BY mtime ASC"
+        params = [n]
 
-    # fallback: substring match on path
-    return ("SELECT path, size, mtime, ext FROM files WHERE path LIKE ? ORDER BY path", [f"%{q}%"])
+    else:
+        # fallback: substring match on tar_path (or all rows if empty query)
+        if q:
+            sql = base_select + " WHERE tar_path LIKE ? ORDER BY tar_path"
+            params = [f"%{q}%"]
+        else:
+            sql = base_select + " ORDER BY tar_path"
+
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+
+    return sql, params
 
 
 def main():
-    if len(sys.argv) < 3:
+    try:
+        parsed = parse_args(sys.argv)
+    except Exception as e:
+        print(f"Error: {e}")
         usage()
         return
 
-    db_path = sys.argv[1]
-    query = " ".join(sys.argv[2:])
+    if not parsed:
+        usage()
+        return
+
+    db_path, query, paths_only, limit = parsed
 
     if not os.path.isfile(db_path):
         print(f"Error: index not found: {db_path}")
         return
 
-    sql, params = build_sql(query)
+    sql, params = build_sql(query, limit)
 
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
@@ -77,8 +143,13 @@ def main():
         print("(no matches)")
         return
 
-    for path, size, mtime, ext in rows:
-        print(f"{path}\t{size}\t{mtime}\t{ext}")
+    if paths_only:
+        for tar_path, *_ in rows:
+            print(tar_path)
+        return
+
+    for tar_path, size, mtime, ext in rows:
+        print(f"{tar_path}\t{size}\t{mtime}\t{ext}")
 
 
 if __name__ == "__main__":
