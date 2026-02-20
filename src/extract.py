@@ -1,47 +1,48 @@
-import sys
+import argparse
 import os
 import subprocess
+from typing import List
 
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: python src/extract.py <archive.tar.zst> <archive_path1> [archive_path2 ...] [--out OUTDIR]")
-        print("Example: python src/extract.py out/test.tar.zst data/test/config.json --out extracted")
-        return
+def extract_paths(archive_path: str, paths: List[str], out_dir: str = "extracted") -> None:
+    """
+    Extract specific file paths from a .tar.zst archive into out_dir.
 
-    archive = sys.argv[1]
-    tokens = sys.argv[2:]
-
-    out_dir = "extracted"
-    wanted = []
-
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t == "--out":
-            if i == len(tokens) - 1:
-                print("Error: --out requires a directory")
-                return
-            out_dir = tokens[i + 1]
-            i += 2
-            continue
-        wanted.append(t)
-        i += 1
-
-    if not wanted:
-        print("Error: no paths provided")
-        return
-
-    if not os.path.isfile(archive):
-        print(f"Error: archive not found: {archive}")
-        return
+    archive_path: path to out/*.tar.zst
+    paths: list of tar paths as stored in the archive (e.g. "data/test/config.json")
+    out_dir: extraction destination
+    """
+    if not os.path.isfile(archive_path):
+        raise FileNotFoundError(f"Archive not found: {archive_path}")
 
     os.makedirs(out_dir, exist_ok=True)
 
-    cmd = ["tar", "--use-compress-program=zstd", "-xf", archive, "-C", out_dir, *wanted]
-    subprocess.run(cmd, check=True)
+    if not paths:
+        print("(no paths to extract)")
+        return
 
+    cmd = [
+        "tar",
+        "--use-compress-program=zstd",
+        "-xf",
+        archive_path,
+        "-C",
+        out_dir,
+        *paths,
+    ]
+
+    subprocess.run(cmd, check=True)
     print(f"[+] Extracted to: {out_dir}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Extract specific files from a .tar.zst archive")
+    ap.add_argument("archive", help="Path to archive .tar.zst")
+    ap.add_argument("paths", nargs="+", help="One or more tar paths to extract")
+    ap.add_argument("--out", default="extracted", help="Output directory")
+    args = ap.parse_args()
+
+    extract_paths(args.archive, args.paths, out_dir=args.out)
 
 
 if __name__ == "__main__":

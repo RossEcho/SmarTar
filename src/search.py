@@ -11,9 +11,9 @@ def usage():
     print("  ext=.json")
     print("  name=config")
     print("  path=logs/")
-    print("  size>100000")
-    print("  mtime<1700000000   (unix epoch)")
-    print("  any text -> substring match on tar_path")
+    print('  content=jwt')
+    print('  content="api key"')
+    print('  size>100000   (quote >/< in shell)')
     print("")
     print("Flags:")
     print("  --paths        print only tar_path (one per line)")
@@ -27,7 +27,6 @@ def parse_args(argv):
 
     db_path = argv[1]
 
-    # Parse flags at the end; everything else becomes query text
     paths_only = False
     limit = None
 
@@ -51,9 +50,6 @@ def parse_args(argv):
         i += 1
 
     query = " ".join(query_parts).strip()
-    if not query:
-        query = ""
-
     return db_path, query, paths_only, limit
 
 
@@ -78,6 +74,11 @@ def build_sql(query: str, limit: int | None):
         sql = base_select + " WHERE tar_path LIKE ? ORDER BY tar_path"
         params = [f"%{needle}%"]
 
+    elif q.startswith("content="):
+        needle = q.split("=", 1)[1].strip().strip('"').strip("'")
+        sql = base_select + " WHERE snippet IS NOT NULL AND snippet LIKE ? ORDER BY tar_path"
+        params = [f"%{needle}%"]
+
     elif q.startswith("size>"):
         n = int(q[5:].strip())
         sql = base_select + " WHERE size > ? ORDER BY size DESC"
@@ -99,10 +100,10 @@ def build_sql(query: str, limit: int | None):
         params = [n]
 
     else:
-        # fallback: substring match on tar_path (or all rows if empty query)
+        # fallback: search by path OR snippet (best POC UX)
         if q:
-            sql = base_select + " WHERE tar_path LIKE ? ORDER BY tar_path"
-            params = [f"%{q}%"]
+            sql = base_select + " WHERE tar_path LIKE ? OR (snippet IS NOT NULL AND snippet LIKE ?) ORDER BY tar_path"
+            params = [f"%{q}%", f"%{q}%"]
         else:
             sql = base_select + " ORDER BY tar_path"
 
