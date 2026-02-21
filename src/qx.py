@@ -2,9 +2,11 @@ import argparse
 import sqlite3
 import re
 from typing import List, Tuple
+import time
 
 from src.extract import extract_paths
-from src.ai_rank import score, close as ai_close
+from src.ai_rank import rank_candidates, close as ai_close
+from src.config import get_config, normalize_ai_mode
 
 
 def _tokens(q: str) -> List[str]:
@@ -13,9 +15,9 @@ def _tokens(q: str) -> List[str]:
     return toks[:16] if toks else []
 
 
-def load_candidates(db_path: str, query: str, limit: int, fallback_all: bool = False) -> List[Tuple[str, str]]:
+def load_candidates(db_path: str, query: str, limit: int, fallback_all: bool = False) -> List[dict]:
     """
-    Return list of (tar_path, snippet) candidates using tokenized LIKE over:
+        Return list of candidate dicts using tokenized LIKE over:
       rel_path, tar_path, snippet (if exists)
     If fallback_all is True and token search returns nothing, returns up to `limit`
     rows (best effort) so AI can rank anyway.
@@ -29,7 +31,7 @@ def load_candidates(db_path: str, query: str, limit: int, fallback_all: bool = F
     has_snippet = "snippet" in cols
 
     toks = _tokens(query)
-    rows: List[Tuple[str, str]] = []
+    rows: List[Tuple[int, str, str, bytes, float]] = []
 
     if toks:
         # Build OR conditions for each token across columns
@@ -49,15 +51,17 @@ def load_candidates(db_path: str, query: str, limit: int, fallback_all: bool = F
 
         if has_snippet:
             sql = f"""
-            SELECT tar_path, COALESCE(snippet, '')
-            FROM files
+            SELECT f.rowid, f.tar_path, COALESCE(f.snippet, ''), e.vec, e.norm
+            FROM files f
+            LEFT JOIN embeddings e ON e.file_id = f.rowid
             WHERE {where}
             LIMIT ?
             """
         else:
             sql = f"""
-            SELECT tar_path, ''
-            FROM files
+            SELECT f.rowid, f.tar_path, '', e.vec, e.norm
+            FROM files f
+            LEFT JOIN embeddings e ON e.file_id = f.rowid
             WHERE {where}
             LIMIT ?
             """
@@ -70,81 +74,94 @@ def load_candidates(db_path: str, query: str, limit: int, fallback_all: bool = F
     if (not rows) and fallback_all:
         if has_snippet:
             sql = """
-            SELECT tar_path, COALESCE(snippet, '')
-            FROM files
-            WHERE tar_path IS NOT NULL
+            SELECT f.rowid, f.tar_path, COALESCE(f.snippet, ''), e.vec, e.norm
+            FROM files f
+            LEFT JOIN embeddings e ON e.file_id = f.rowid
+            WHERE f.tar_path IS NOT NULL
             LIMIT ?
             """
             cur.execute(sql, (limit,))
         else:
             sql = """
-            SELECT tar_path, ''
-            FROM files
-            WHERE tar_path IS NOT NULL
+            SELECT f.rowid, f.tar_path, '', e.vec, e.norm
+            FROM files f
+            LEFT JOIN embeddings e ON e.file_id = f.rowid
+            WHERE f.tar_path IS NOT NULL
             LIMIT ?
             """
             cur.execute(sql, (limit,))
         rows = cur.fetchall()
 
     conn.close()
-    return rows
+    return [
+        {
+            "file_id": row[0],
+            "tar_path": row[1],
+            "snippet": row[2] or "",
+            "vec": row[3],
+            "norm": row[4],
+            "score": 0.0,
+            "base_score": 0.0,
+        }
+        for row in rows
+    ]
 
 
 def main():
     parser = argparse.ArgumentParser(description="Query archive with optional AI ranking")
     parser.add_argument("db", help="Path to index .db")
-    parser.add_argument("archive", help="Path to archive .tar.zst")
+    parser.add_argument("archive", help="Path to archive .tar")
     parser.add_argument("query", help="Query string")
-    parser.add_argument("--ai", action="store_true", help="Use AI ranking")
+    parser.add_argument("--ai", default=None, help="AI mode: off|emb|hybrid")
     parser.add_argument("--limit", type=int, default=50, help="Max candidates to consider")
-    parser.add_argument("--topk", type=int, default=3, help="How many results to extract")
-    parser.add_argument("--threshold", type=float, default=0.7, help="AI score threshold")
+    parser.add_argument("--topk", type=int, default=1, help="How many results to extract")
+    parser.add_argument("--epsilon", type=float, default=0.02, help="Hybrid rerank trigger spread")
     parser.add_argument("--out", default="extracted", help="Output directory")
     parser.add_argument("--debug", action="store_true", help="Debug output")
 
     args = parser.parse_args()
 
-    candidates = load_candidates(args.db, args.query, args.limit, fallback_all=args.ai)
+    cfg = get_config()
+    ai_mode = normalize_ai_mode(args.ai if args.ai is not None else cfg.ai_mode)
+
+    candidates = load_candidates(args.db, args.query, args.limit, fallback_all=(ai_mode != "off"))
 
     if not candidates:
         print("(no matches)")
         return
 
     # If no AI, just extract topK by DB order
-    if not args.ai:
-        paths = [p for p, _ in candidates[:args.topk]]
+    if ai_mode == "off":
+        paths = [item["tar_path"] for item in candidates[: args.topk]]
         for p in paths:
             print(p)
         extract_paths(args.archive, paths, out_dir=args.out)
         return
 
-    # AI ranking
-    scored = []
-    best_score = 0.0
-    best_path = None
+    t0 = time.perf_counter()
+    ranked, perf = rank_candidates(
+        query=args.query,
+        candidates=candidates,
+        mode=ai_mode,
+        topk=args.topk,
+        epsilon=args.epsilon,
+        debug=args.debug,
+    )
+    total_s = time.perf_counter() - t0
 
     try:
-        for path, snip in candidates:
-            s = score(args.query, snip, debug=args.debug)
-            scored.append((s, path))
+        selected_items = ranked[: max(1, args.topk)]
+        selected = [it["tar_path"] for it in selected_items]
 
-            if s > best_score:
-                best_score = s
-                best_path = path
+        for it in selected_items:
+            print(f"{it['tar_path']}\t{float(it.get('score', 0.0)):.4f}")
 
-            if args.debug:
-                print(f"[AI] {s:.3f} {path}")
+        print(
+            f"[perf] embed_s={perf['embed_s']:.4f} cosine_s={perf['cosine_s']:.4f} "
+            f"rerank_s={perf['rerank_s']:.4f} total_rank_s={total_s:.4f}"
+        )
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        selected = [p for s, p in scored if s >= args.threshold][: args.topk]
-
-        if selected:
-            for p in selected:
-                print(p)
-            extract_paths(args.archive, selected, out_dir=args.out)
-        else:
-            print(f"(no match confident enough) best={best_score:.2f} path={best_path}")
+        extract_paths(args.archive, selected, out_dir=args.out)
     finally:
         ai_close()
 

@@ -6,9 +6,9 @@ from typing import List
 
 def extract_paths(archive_path: str, paths: List[str], out_dir: str = "extracted") -> None:
     """
-    Extract specific file paths from a .tar.zst archive into out_dir.
+    Extract specific file paths from a .tar archive into out_dir.
 
-    archive_path: path to out/*.tar.zst
+    archive_path: path to out/*.tar
     paths: list of tar paths as stored in the archive (e.g. "data/test/config.json")
     out_dir: extraction destination
     """
@@ -21,23 +21,16 @@ def extract_paths(archive_path: str, paths: List[str], out_dir: str = "extracted
         print("(no paths to extract)")
         return
 
-    cmd = [
-        "tar",
-        "--use-compress-program=zstd",
-        "-xf",
-        archive_path,
-        "-C",
-        out_dir,
-        *paths,
-    ]
+    norm_paths = [p.replace("\\", "/") for p in paths]
 
-    subprocess.run(cmd, check=True)
+    subprocess.run(["tar", "-xf", archive_path, "-C", out_dir, *norm_paths], check=True)
+
     print(f"[+] Extracted to: {out_dir}")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Extract specific files from a .tar.zst archive")
-    ap.add_argument("archive", help="Path to archive .tar.zst")
+    ap = argparse.ArgumentParser(description="Extract specific files from a .tar archive")
+    ap.add_argument("archive", help="Path to archive .tar")
     ap.add_argument("paths", nargs="+", help="One or more tar paths to extract")
     ap.add_argument("--out", default="extracted", help="Output directory")
     args = ap.parse_args()
